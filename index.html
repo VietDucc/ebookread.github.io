@@ -1,0 +1,1431 @@
+<!DOCTYPE html>
+<html lang="vi" class="h-full dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Page Flip PDF Reader - Đọc Sách Chân Thực</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        // Brand palette: Warm Taupe accent on charcoal neutrals
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        taupe: { DEFAULT: '#BEA98E', light: '#D2C2AC', dark: '#9C8A72' },
+                        ink: { DEFAULT: '#0C0C0C', 800: '#2C2C2C', 700: '#4A4A4A' }
+                    }
+                }
+            }
+        };
+    </script>
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- PDF.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,300;0,400;0,700;1,300&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        body {
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            user-select: none;
+            overflow-x: hidden;
+        }
+
+        /* App chrome palette */
+        :root {
+            --taupe: #BEA98E;
+            --charcoal-black: #0C0C0C;
+            --dark-charcoal: #2C2C2C;
+            --dim-gray: #4A4A4A;
+            --bg-color: var(--charcoal-black);
+            --reader-bg: #141414;
+            --text-color: #EDE6DC;
+            --border-color: var(--dark-charcoal);
+            --spine-shadow: rgba(0, 0, 0, 0.6);
+            --paper-color: #fbf0d9;
+        }
+
+        /* Reading themes presets (paper only) */
+        .theme-sepia { --paper-color: #fbf0d9; }
+        .theme-cream { --paper-color: #faf8f0; }
+        .theme-light { --paper-color: #ffffff; }
+        .theme-dark  { --paper-color: #1c1c1c; }
+
+        /* Night reading: invert rendered PDF pages to light text on dark paper */
+        .theme-dark #book-container canvas {
+            filter: invert(0.88) hue-rotate(180deg);
+        }
+
+        /* Soft spotlight behind the book */
+        #reader-workspace {
+            background: radial-gradient(ellipse at center, #1f1f1f 0%, var(--charcoal-black) 70%);
+        }
+
+        ::selection {
+            background: rgba(190, 169, 142, 0.35);
+        }
+
+        /* Book container styles */
+        .book-wrapper {
+            perspective: 2200px;
+            perspective-origin: 50% 50%;
+        }
+
+        .book-container {
+            position: relative;
+            transform-style: preserve-3d;
+            transition: transform 0.3s ease;
+            box-shadow: 0 30px 70px -15px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(255, 255, 255, 0.03);
+        }
+
+        /* Spine realistic shadow */
+        .book-spine-shadow {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 50%;
+            width: 50px;
+            transform: translateX(-50%);
+            z-index: 30;
+            pointer-events: none;
+            background: linear-gradient(
+                to right,
+                rgba(0, 0, 0, 0.18) 0%,
+                rgba(0, 0, 0, 0.08) 35%,
+                rgba(0, 0, 0, 0.35) 50%,
+                rgba(0, 0, 0, 0.08) 65%,
+                rgba(0, 0, 0, 0.18) 100%
+            );
+        }
+
+        /* Page styling & 3D Flipping animation (driven by Web Animations API in JS) */
+        .page-sheet {
+            position: absolute;
+            top: 0;
+            height: 100%;
+            z-index: 35;
+            transform-style: preserve-3d;
+            will-change: transform;
+            pointer-events: none;
+        }
+
+        .page-sheet.page-left {
+            transform-origin: right center;
+        }
+
+        .page-sheet.page-right {
+            transform-origin: left center;
+        }
+
+        /* Two-sided sheet: front = page being turned, back = page revealed on the other side */
+        .flip-face {
+            position: absolute;
+            inset: 0;
+            overflow: hidden;
+            background-color: var(--paper-color);
+            backface-visibility: hidden;
+            -webkit-backface-visibility: hidden;
+        }
+
+        .flip-back {
+            transform: rotateY(180deg);
+        }
+
+        .flip-shade {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            opacity: 0;
+        }
+
+        /* Shade darkest at the spine side of each face */
+        .page-right .flip-front .flip-shade,
+        .page-left .flip-back .flip-shade {
+            background: linear-gradient(to right, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.2) 25%, rgba(0,0,0,0.08) 100%);
+        }
+
+        .page-right .flip-back .flip-shade,
+        .page-left .flip-front .flip-shade {
+            background: linear-gradient(to left, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.2) 25%, rgba(0,0,0,0.08) 100%);
+        }
+
+        /* Shadow the turning sheet casts onto the static pages */
+        .flip-cast-shadow {
+            position: absolute;
+            inset: 0;
+            z-index: 20;
+            pointer-events: none;
+            opacity: 0;
+        }
+
+        #left-page-container .flip-cast-shadow {
+            background: linear-gradient(to left, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0.12) 35%, rgba(0,0,0,0) 75%);
+        }
+
+        #right-page-container .flip-cast-shadow {
+            background: linear-gradient(to right, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0.12) 35%, rgba(0,0,0,0) 75%);
+        }
+
+        /* Dynamic lighting/contrast filter overlay */
+        .filter-layer {
+            filter: brightness(var(--brightness, 1)) contrast(var(--contrast, 1));
+            transition: filter 0.2s ease;
+        }
+
+        .warmth-overlay {
+            pointer-events: none;
+            background-color: rgba(255, 160, 0, var(--warmth, 0));
+            mix-blend-mode: multiply;
+        }
+
+        /* Page Curl Corner Hint */
+        .corner-hint {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            bottom: 0;
+            z-index: 25;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .corner-hint-right {
+            right: 0;
+            background: linear-gradient(135deg, transparent 50%, rgba(0,0,0,0.08) 50%);
+        }
+
+        .corner-hint-left {
+            left: 0;
+            background: linear-gradient(-135deg, transparent 50%, rgba(0,0,0,0.08) 50%);
+        }
+
+        .corner-hint:hover {
+            width: 55px;
+            height: 55px;
+        }
+
+        /* Custom Scrollbar for Sidebar */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: var(--dim-gray);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--taupe);
+        }
+
+        /* Glassmorphism panel styling */
+        .glass-panel {
+            background: rgba(44, 44, 44, 0.92);
+            backdrop-filter: blur(14px);
+            border: 1px solid var(--dim-gray);
+            color: var(--text-color);
+        }
+
+        /* Inner Shadow page gradient simulation */
+        .page-shadow-left {
+            background: linear-gradient(to right, rgba(0,0,0,0.06) 0%, rgba(0,0,0,0) 10%, rgba(0,0,0,0) 90%, rgba(0,0,0,0.08) 100%);
+        }
+
+        .page-shadow-right {
+            background: linear-gradient(to right, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0) 10%, rgba(0,0,0,0) 90%, rgba(0,0,0,0.06) 100%);
+        }
+    </style>
+</head>
+<body class="theme-sepia h-full transition-colors duration-300" style="background-color: var(--bg-color); color: var(--text-color);">
+
+    <div id="app" class="flex flex-col h-screen w-screen overflow-hidden relative">
+
+        <!-- HEADER / NAVIGATION BAR -->
+        <header class="h-16 px-4 flex items-center justify-between border-b z-40 shrink-0 transition-colors duration-300" style="border-color: var(--border-color); background-color: var(--reader-bg);">
+            <!-- Left Header: Title & Upload -->
+            <div class="flex items-center space-x-3">
+                <button id="btn-toggle-sidebar" class="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors text-lg" title="Mục lục & Trang nhỏ">
+                    <i class="fa-solid fa-list-ul"></i>
+                </button>
+
+                <div class="flex items-center space-x-2">
+                    <div class="bg-taupe text-ink p-2 rounded-lg shadow-sm">
+                        <i class="fa-solid fa-book-open text-lg"></i>
+                    </div>
+                    <div>
+                        <h1 id="book-title" class="font-bold text-sm sm:text-base leading-tight truncate max-w-[180px] sm:max-w-xs md:max-w-md">Chưa có tài liệu</h1>
+                        <p id="book-info" class="text-xs opacity-70">Tải lên file PDF để bắt đầu đọc</p>
+                    </div>
+                </div>
+
+                <label class="cursor-pointer ml-2 bg-taupe hover:bg-taupe-light text-ink font-semibold text-xs sm:text-sm font-medium px-3 py-2 rounded-lg shadow transition flex items-center gap-2">
+                    <i class="fa-solid fa-file-arrow-up"></i>
+                    <span class="hidden sm:inline">Mở file PDF</span>
+                    <input type="file" id="file-input" accept="application/pdf" class="hidden">
+                </label>
+
+                <button id="btn-library" class="ml-1 p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors flex items-center gap-2 text-xs sm:text-sm font-medium" title="Sách đã đọc">
+                    <i class="fa-solid fa-clock-rotate-left text-lg"></i>
+                    <span class="hidden lg:inline">Đã đọc</span>
+                </button>
+            </div>
+
+            <!-- Middle Header: Page Control Slider -->
+            <div id="page-nav-center" class="hidden md:flex items-center space-x-3 bg-black/5 dark:bg-white/5 px-4 py-1.5 rounded-full border border-black/5">
+                <button id="btn-first" class="hover:text-taupe text-xs px-1" title="Trang đầu"><i class="fa-solid fa-backward-step"></i></button>
+                <button id="btn-prev" class="hover:text-taupe text-xs px-1" title="Trang trước"><i class="fa-solid fa-chevron-left"></i></button>
+                
+                <div class="flex items-center space-x-1 text-sm font-medium">
+                    <input type="number" id="input-page" min="1" value="1" class="w-12 text-center bg-transparent border border-black/20 dark:border-white/20 rounded py-0.5 text-xs font-bold focus:outline-none focus:border-taupe">
+                    <span class="opacity-60 text-xs">/</span>
+                    <span id="total-pages" class="opacity-70 text-xs">0</span>
+                </div>
+
+                <button id="btn-next" class="hover:text-taupe text-xs px-1" title="Trang sau"><i class="fa-solid fa-chevron-right"></i></button>
+                <button id="btn-last" class="hover:text-taupe text-xs px-1" title="Trang cuối"><i class="fa-solid fa-forward-step"></i></button>
+            </div>
+
+            <!-- Right Header: Settings & Controls -->
+            <div class="flex items-center space-x-1 sm:space-x-2">
+                <!-- Eye-care preset popup trigger -->
+                <button id="btn-theme-menu" class="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors" title="Chế độ bảo vệ mắt">
+                    <i class="fa-solid fa-eye text-lg"></i>
+                </button>
+
+                <!-- Eye adjustments popup trigger -->
+                <button id="btn-adjust-menu" class="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors" title="Điều chỉnh ánh sáng & màu">
+                    <i class="fa-solid fa-sliders text-lg"></i>
+                </button>
+
+                <!-- Zoom Controls -->
+                <div class="hidden sm:flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-1">
+                    <button id="btn-zoom-out" class="p-1.5 px-2 hover:bg-black/10 dark:hover:bg-white/10 rounded transition text-xs" title="Thu nhỏ"><i class="fa-solid fa-minus"></i></button>
+                    <span id="zoom-value" class="text-xs px-2 font-mono font-bold">100%</span>
+                    <button id="btn-zoom-in" class="p-1.5 px-2 hover:bg-black/10 dark:hover:bg-white/10 rounded transition text-xs" title="Phóng to"><i class="fa-solid fa-plus"></i></button>
+                </div>
+
+                <!-- Shortcuts Hint -->
+                <button id="btn-shortcuts" class="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors hidden lg:block" title="Phím tắt">
+                    <i class="fa-regular fa-keyboard text-lg"></i>
+                </button>
+
+                <!-- Fullscreen Button -->
+                <button id="btn-fullscreen" class="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors" title="Toàn màn hình (F)">
+                    <i class="fa-solid fa-expand text-lg"></i>
+                </button>
+            </div>
+        </header>
+
+        <!-- MAIN READER CONTAINER -->
+        <main class="flex-1 relative flex items-center justify-center overflow-hidden p-2 sm:p-6 select-none" id="reader-workspace">
+            
+            <div id="drop-zone" class="absolute inset-0 z-50 flex flex-col items-center justify-center bg-ink/70 backdrop-blur-md border-4 border-dashed border-taupe m-4 rounded-3xl opacity-0 pointer-events-none transition-all duration-300">
+                <i class="fa-solid fa-file-pdf text-6xl text-taupe mb-4 animate-bounce"></i>
+                <h2 class="text-2xl font-bold text-white">Thả file PDF vào đây để đọc</h2>
+                <p class="text-sm opacity-70 mt-1">Hỗ trợ đọc sách song song 3D sắc nét</p>
+            </div>
+
+            <!-- Empty State / Welcome Screen -->
+            <div id="empty-state" class="flex flex-col items-center justify-center text-center p-8 max-w-lg mx-auto">
+                <div class="w-24 h-24 bg-taupe/10 rounded-full flex items-center justify-center mb-6 text-taupe text-4xl shadow-inner">
+                    <i class="fa-solid fa-book-open-reader"></i>
+                </div>
+                <h2 class="text-2xl font-bold mb-2">Đọc Sách 3D Ergonomic Reader</h2>
+                <p class="text-sm opacity-75 mb-6 leading-relaxed">
+                    Tải lên file PDF từ máy tính của bạn để bắt đầu trải nghiệm đọc sách lật trang 3D chân thực, được thiết kế tối ưu ánh sáng bảo vệ mắt.
+                </p>
+                
+                <label class="cursor-pointer bg-taupe hover:bg-taupe-light text-ink font-semibold px-6 py-3 rounded-xl shadow-lg hover:shadow-xl transition flex items-center gap-3">
+                    <i class="fa-solid fa-folder-open text-lg"></i>
+                    <span>Chọn file PDF từ thiết bị</span>
+                    <input type="file" id="empty-file-input" accept="application/pdf" class="hidden">
+                </label>
+                <p class="text-xs opacity-50 mt-4">Hoặc kéo và thả file PDF vào bất kỳ vị trí nào trên trang</p>
+
+                <div id="empty-recent" class="hidden w-full mt-8 text-left">
+                    <h3 class="font-bold text-sm mb-3 flex items-center gap-2"><i class="fa-solid fa-clock-rotate-left text-taupe"></i> Tiếp tục đọc</h3>
+                    <div id="empty-recent-list" class="space-y-2 max-h-[40vh] overflow-y-auto pr-1"></div>
+                </div>
+            </div>
+
+            <!-- Loading Spinner Overlay -->
+            <div id="loading-overlay" class="hidden absolute inset-0 bg-black/30 backdrop-blur-sm z-30 flex flex-col items-center justify-center text-white">
+                <div class="w-12 h-12 border-4 border-taupe border-t-transparent rounded-full animate-spin mb-3"></div>
+                <p id="loading-text" class="text-sm font-medium tracking-wide">Đang xử lý PDF...</p>
+            </div>
+
+            <!-- 3D BOOK DISPLAY CONTAINER -->
+            <div id="book-wrapper" class="book-wrapper hidden relative max-w-full max-h-full flex items-center justify-center">
+                <div id="book-container" class="book-container filter-layer relative flex items-center justify-center transition-transform duration-200">
+                    
+                    <!-- Spine Center Realistic Shadow Overlay -->
+                    <div class="book-spine-shadow"></div>
+
+                    <!-- Left Page View -->
+                    <div id="left-page-container" class="relative overflow-hidden page-shadow-left border-r border-black/10" style="background-color: var(--paper-color);">
+                        <canvas id="canvas-left" class="w-full h-full object-contain block"></canvas>
+                        <!-- Warmth Filter overlay -->
+                        <div class="warmth-overlay absolute inset-0"></div>
+                        <div id="cast-shadow-left" class="flip-cast-shadow"></div>
+                        <!-- Corner Hint Left -->
+                        <div id="hint-left" class="corner-hint corner-hint-left hidden" title="Trang trước"></div>
+                    </div>
+
+                    <!-- Right Page View -->
+                    <div id="right-page-container" class="relative overflow-hidden page-shadow-right" style="background-color: var(--paper-color);">
+                        <canvas id="canvas-right" class="w-full h-full object-contain block"></canvas>
+                        <!-- Warmth Filter overlay -->
+                        <div class="warmth-overlay absolute inset-0"></div>
+                        <div id="cast-shadow-right" class="flip-cast-shadow"></div>
+                        <!-- Corner Hint Right -->
+                        <div id="hint-right" class="corner-hint corner-hint-right hidden" title="Trang sau"></div>
+                    </div>
+
+                    <!-- Animated Flip Sheet overlay -->
+                    <div id="flip-sheet" class="page-sheet hidden">
+                        <div class="flip-face flip-front">
+                            <canvas id="canvas-flip" class="w-full h-full object-contain block"></canvas>
+                            <div class="warmth-overlay absolute inset-0"></div>
+                            <div id="flip-shade-front" class="flip-shade"></div>
+                        </div>
+                        <div class="flip-face flip-back">
+                            <canvas id="canvas-flip-back" class="w-full h-full object-contain block"></canvas>
+                            <div class="warmth-overlay absolute inset-0"></div>
+                            <div id="flip-shade-back" class="flip-shade"></div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+
+            <!-- Navigation Arrow Side Overlay Buttons -->
+            <button id="nav-btn-prev" class="hidden absolute left-4 top-1/2 -translate-y-1/2 z-30 w-12 h-12 rounded-full glass-panel flex items-center justify-center shadow-lg hover:scale-110 active:scale-95 transition text-white/85 hover:text-taupe" title="Trang trước (←)">
+                <i class="fa-solid fa-chevron-left text-xl"></i>
+            </button>
+            <button id="nav-btn-next" class="hidden absolute right-4 top-1/2 -translate-y-1/2 z-30 w-12 h-12 rounded-full glass-panel flex items-center justify-center shadow-lg hover:scale-110 active:scale-95 transition text-white/85 hover:text-taupe" title="Trang sau (→)">
+                <i class="fa-solid fa-chevron-right text-xl"></i>
+            </button>
+
+        </main>
+
+        <!-- BOTTOM MOBILE BAR & PAGE SLIDER -->
+        <footer class="h-12 px-4 border-t flex items-center justify-between z-30 text-xs shrink-0 transition-colors duration-300" style="border-color: var(--border-color); background-color: var(--reader-bg);">
+            <div class="flex items-center space-x-2 w-full max-w-md mx-auto">
+                <span id="footer-page-curr" class="font-bold min-w-[20px] text-right">0</span>
+                <input type="range" id="slider-page" min="1" max="1" value="1" class="w-full h-1.5 bg-black/10 dark:bg-white/10 rounded-lg appearance-none cursor-pointer accent-taupe">
+                <span id="footer-page-total" class="font-bold min-w-[20px]">0</span>
+            </div>
+        </footer>
+
+
+        <!-- SIDEBAR: THUMBNAILS & PAGES -->
+        <aside id="sidebar-thumbnails" class="fixed top-16 left-0 bottom-12 w-64 glass-panel z-40 border-r shadow-2xl transition-transform duration-300 transform -translate-x-full flex flex-col">
+            <div class="p-3 border-b border-black/10 dark:border-white/10 flex items-center justify-between">
+                <h3 class="font-bold text-xs uppercase tracking-wider opacity-80"><i class="fa-solid fa-border-all mr-2"></i>Danh sách trang</h3>
+                <button id="btn-close-sidebar" class="text-xs p-1 hover:opacity-70"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div id="thumbnails-container" class="flex-1 overflow-y-auto p-3 grid grid-cols-2 gap-3">
+                <!-- Thumbnail items rendered dynamically -->
+            </div>
+        </aside>
+
+        <!-- POPUP: EYE-CARE THEMES PRESETS -->
+        <div id="popover-themes" class="hidden absolute top-16 right-16 z-50 w-72 glass-panel rounded-2xl shadow-2xl p-4 border transition-all">
+            <h3 class="font-bold text-sm mb-3 flex items-center gap-2"><i class="fa-solid fa-palette text-taupe"></i> Chế độ màu bảo vệ mắt</h3>
+            <div class="grid grid-cols-2 gap-2">
+                <button data-theme="sepia" class="theme-btn p-3 rounded-xl border border-ink-700 text-left transition flex flex-col justify-between" style="background-color: #f4ecd8; color: #433422;">
+                    <span class="font-semibold text-xs">Giấy Ngà</span>
+                    <span class="text-[10px] opacity-70 mt-1">Ấm áp, êm mắt</span>
+                </button>
+                <button data-theme="cream" class="theme-btn p-3 rounded-xl border border-ink-700 text-left transition flex flex-col justify-between" style="background-color: #f7f5ed; color: #2c302e;">
+                    <span class="font-semibold text-xs">Giấy Kem</span>
+                    <span class="text-[10px] opacity-70 mt-1">Dịu nhẹ, tự nhiên</span>
+                </button>
+                <button data-theme="light" class="theme-btn p-3 rounded-xl border border-ink-700 text-left transition flex flex-col justify-between" style="background-color: #ffffff; color: #111827;">
+                    <span class="font-semibold text-xs">Sáng Tiêu Chuẩn</span>
+                    <span class="text-[10px] opacity-70 mt-1">Sắc nét, rõ ràng</span>
+                </button>
+                <button data-theme="dark" class="theme-btn p-3 rounded-xl border border-ink-700 text-left transition flex flex-col justify-between" style="background-color: #1c1c1c; color: #EDE6DC;">
+                    <span class="font-semibold text-xs">Chế Độ Tối</span>
+                    <span class="text-[10px] opacity-70 mt-1">Đọc ban đêm</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- POPUP: LIGHTING & ADJUSTMENTS SLIDERS -->
+        <div id="popover-adjustments" class="hidden absolute top-16 right-12 z-50 w-80 glass-panel rounded-2xl shadow-2xl p-4 border transition-all">
+            <h3 class="font-bold text-sm mb-4 flex items-center gap-2"><i class="fa-solid fa-sliders text-taupe"></i> Điều chỉnh ánh sáng & thị giác</h3>
+            
+            <!-- Brightness -->
+            <div class="mb-4">
+                <div class="flex justify-between text-xs mb-1 font-medium">
+                    <span><i class="fa-regular fa-sun mr-1"></i> Độ sáng</span>
+                    <span id="val-brightness">100%</span>
+                </div>
+                <input type="range" id="slider-brightness" min="50" max="150" value="100" class="w-full h-1.5 bg-black/10 dark:bg-white/10 rounded-lg appearance-none cursor-pointer accent-taupe">
+            </div>
+
+            <!-- Contrast -->
+            <div class="mb-4">
+                <div class="flex justify-between text-xs mb-1 font-medium">
+                    <span><i class="fa-solid fa-circle-half-stroke mr-1"></i> Độ tương phản</span>
+                    <span id="val-contrast">100%</span>
+                </div>
+                <input type="range" id="slider-contrast" min="70" max="140" value="100" class="w-full h-1.5 bg-black/10 dark:bg-white/10 rounded-lg appearance-none cursor-pointer accent-taupe">
+            </div>
+
+            <!-- Warmth Tint -->
+            <div class="mb-2">
+                <div class="flex justify-between text-xs mb-1 font-medium">
+                    <span><i class="fa-solid fa-temperature-three-quarters mr-1"></i> Lọc ánh sáng xanh</span>
+                    <span id="val-warmth">0%</span>
+                </div>
+                <input type="range" id="slider-warmth" min="0" max="40" value="0" class="w-full h-1.5 bg-black/10 dark:bg-white/10 rounded-lg appearance-none cursor-pointer accent-taupe">
+            </div>
+
+            <button id="btn-reset-adjustments" class="mt-3 w-full py-1.5 text-xs text-taupe hover:bg-taupe/10 rounded-lg font-medium transition">
+                <i class="fa-solid fa-rotate-left mr-1"></i> Khôi phục mặc định
+            </button>
+        </div>
+
+        <!-- POPUP: READING HISTORY MODAL -->
+        <div id="modal-library" class="hidden fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+            <div class="glass-panel w-full max-w-lg rounded-2xl shadow-2xl p-6 border relative">
+                <button id="btn-close-library" class="absolute top-4 right-4 text-white/50 hover:text-taupe"><i class="fa-solid fa-xmark text-lg"></i></button>
+                <h3 class="font-bold text-lg mb-4 flex items-center gap-2"><i class="fa-solid fa-clock-rotate-left text-taupe"></i> Sách đã đọc</h3>
+                <div id="library-list" class="space-y-2 max-h-[60vh] overflow-y-auto pr-1"></div>
+            </div>
+        </div>
+
+        <!-- POPUP: SHORTCUTS GUIDE MODAL -->
+        <div id="modal-shortcuts" class="hidden fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+            <div class="glass-panel w-full max-w-md rounded-2xl shadow-2xl p-6 border relative animate-in fade-in zoom-in-95 duration-200">
+                <button id="btn-close-shortcuts" class="absolute top-4 right-4 text-white/50 hover:text-taupe"><i class="fa-solid fa-xmark text-lg"></i></button>
+                <h3 class="font-bold text-lg mb-4 flex items-center gap-2"><i class="fa-regular fa-keyboard text-taupe"></i> Phím tắt hỗ trợ</h3>
+                <div class="space-y-3 text-xs sm:text-sm">
+                    <div class="flex justify-between items-center pb-2 border-b border-black/10 dark:border-white/10">
+                        <span>Lật sang trang tiếp theo</span>
+                        <kbd class="px-2.5 py-1 bg-black/10 dark:bg-white/10 rounded font-mono font-bold">Mũi tên Phải / Space</kbd>
+                    </div>
+                    <div class="flex justify-between items-center pb-2 border-b border-black/10 dark:border-white/10">
+                        <span>Lật lại trang trước</span>
+                        <kbd class="px-2.5 py-1 bg-black/10 dark:bg-white/10 rounded font-mono font-bold">Mũi tên Trái</kbd>
+                    </div>
+                    <div class="flex justify-between items-center pb-2 border-b border-black/10 dark:border-white/10">
+                        <span>Bật / Tắt Toàn màn hình</span>
+                        <kbd class="px-2.5 py-1 bg-black/10 dark:bg-white/10 rounded font-mono font-bold">F</kbd>
+                    </div>
+                    <div class="flex justify-between items-center pb-2 border-b border-black/10 dark:border-white/10">
+                        <span>Phóng to / Thu nhỏ</span>
+                        <kbd class="px-2.5 py-1 bg-black/10 dark:bg-white/10 rounded font-mono font-bold">+ / -</kbd>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span>Đóng cửa sổ / Tắt menu</span>
+                        <kbd class="px-2.5 py-1 bg-black/10 dark:bg-white/10 rounded font-mono font-bold">ESC</kbd>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // Configure PDF.js Worker path
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        // Core Application State
+        const state = {
+            pdfDoc: null,
+            currentPage: 1, // Current left page index (odd/even dual page basis)
+            totalPages: 0,
+            zoomScale: 1.0,
+            isFlipping: false,
+            brightness: 100,
+            contrast: 100,
+            warmth: 0,
+            currentTheme: 'sepia',
+            renderedPagesCache: new Map(),
+            currentBookId: null,
+            queuedFlip: null,
+            pageAspectRatio: 0.707 // Default A4 aspect ratio height/width
+        };
+
+        // DOM Element Cache
+        const elements = {
+            app: document.getElementById('app'),
+            fileInput: document.getElementById('file-input'),
+            emptyFileInput: document.getElementById('empty-file-input'),
+            dropZone: document.getElementById('drop-zone'),
+            emptyState: document.getElementById('empty-state'),
+            loadingOverlay: document.getElementById('loading-overlay'),
+            loadingText: document.getElementById('loading-text'),
+            bookWrapper: document.getElementById('book-wrapper'),
+            bookContainer: document.getElementById('book-container'),
+            leftPageContainer: document.getElementById('left-page-container'),
+            rightPageContainer: document.getElementById('right-page-container'),
+            canvasLeft: document.getElementById('canvas-left'),
+            canvasRight: document.getElementById('canvas-right'),
+            canvasFlip: document.getElementById('canvas-flip'),
+            canvasFlipBack: document.getElementById('canvas-flip-back'),
+            flipShadeFront: document.getElementById('flip-shade-front'),
+            flipShadeBack: document.getElementById('flip-shade-back'),
+            castShadowLeft: document.getElementById('cast-shadow-left'),
+            castShadowRight: document.getElementById('cast-shadow-right'),
+            flipSheet: document.getElementById('flip-sheet'),
+            bookTitle: document.getElementById('book-title'),
+            bookInfo: document.getElementById('book-info'),
+            inputPage: document.getElementById('input-page'),
+            totalPages: document.getElementById('total-pages'),
+            sliderPage: document.getElementById('slider-page'),
+            footerPageCurr: document.getElementById('footer-page-curr'),
+            footerPageTotal: document.getElementById('footer-page-total'),
+            zoomValue: document.getElementById('zoom-value'),
+            btnPrev: document.getElementById('btn-prev'),
+            btnNext: document.getElementById('btn-next'),
+            btnFirst: document.getElementById('btn-first'),
+            btnLast: document.getElementById('btn-last'),
+            navBtnPrev: document.getElementById('nav-btn-prev'),
+            navBtnNext: document.getElementById('nav-btn-next'),
+            btnZoomIn: document.getElementById('btn-zoom-in'),
+            btnZoomOut: document.getElementById('btn-zoom-out'),
+            btnFullscreen: document.getElementById('btn-fullscreen'),
+            btnThemeMenu: document.getElementById('btn-theme-menu'),
+            btnAdjustMenu: document.getElementById('btn-adjust-menu'),
+            btnShortcuts: document.getElementById('btn-shortcuts'),
+            btnToggleSidebar: document.getElementById('btn-toggle-sidebar'),
+            btnCloseSidebar: document.getElementById('btn-close-sidebar'),
+            sidebarThumbnails: document.getElementById('sidebar-thumbnails'),
+            thumbnailsContainer: document.getElementById('thumbnails-container'),
+            popoverThemes: document.getElementById('popover-themes'),
+            popoverAdjustments: document.getElementById('popover-adjustments'),
+            modalShortcuts: document.getElementById('modal-shortcuts'),
+            btnCloseShortcuts: document.getElementById('btn-close-shortcuts'),
+            sliderBrightness: document.getElementById('slider-brightness'),
+            sliderContrast: document.getElementById('slider-contrast'),
+            sliderWarmth: document.getElementById('slider-warmth'),
+            valBrightness: document.getElementById('val-brightness'),
+            valContrast: document.getElementById('val-contrast'),
+            valWarmth: document.getElementById('val-warmth'),
+            btnResetAdjustments: document.getElementById('btn-reset-adjustments'),
+            hintLeft: document.getElementById('hint-left'),
+            hintRight: document.getElementById('hint-right'),
+            btnLibrary: document.getElementById('btn-library'),
+            modalLibrary: document.getElementById('modal-library'),
+            btnCloseLibrary: document.getElementById('btn-close-library'),
+            libraryList: document.getElementById('library-list'),
+            emptyRecent: document.getElementById('empty-recent'),
+            emptyRecentList: document.getElementById('empty-recent-list')
+        };
+
+        window.addEventListener('DOMContentLoaded', () => {
+            initEventListeners();
+            setTheme(state.currentTheme);
+            applyEyeAdjustments();
+            renderLibrary();
+        });
+
+        function initEventListeners() {
+            // File Selection
+            elements.fileInput.addEventListener('change', handleFileSelect);
+            elements.emptyFileInput.addEventListener('change', handleFileSelect);
+
+            // Drag and Drop
+            window.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                elements.dropZone.classList.remove('opacity-0', 'pointer-events-none');
+            });
+
+            elements.dropZone.addEventListener('dragleave', (e) => {
+                e.preventDefault();
+                elements.dropZone.classList.add('opacity-0', 'pointer-events-none');
+            });
+
+            elements.dropZone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                elements.dropZone.classList.add('opacity-0', 'pointer-events-none');
+                if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    const file = e.dataTransfer.files[0];
+                    if (file.type === 'application/pdf') {
+                        loadPDFFile(file);
+                    } else {
+                        alert('Vui lòng chọn hoặc thả vào file định dạng PDF!');
+                    }
+                }
+            });
+
+            // Navigation Controls
+            elements.btnNext.addEventListener('click', () => nextPage());
+            elements.btnPrev.addEventListener('click', () => prevPage());
+            elements.navBtnNext.addEventListener('click', () => nextPage());
+            elements.navBtnPrev.addEventListener('click', () => prevPage());
+            elements.hintRight.addEventListener('click', () => nextPage());
+            elements.hintLeft.addEventListener('click', () => prevPage());
+
+            elements.btnFirst.addEventListener('click', () => goToPage(1));
+            elements.btnLast.addEventListener('click', () => goToPage(state.totalPages));
+
+            elements.inputPage.addEventListener('change', (e) => {
+                let p = parseInt(e.target.value);
+                if (!isNaN(p)) goToPage(p);
+            });
+
+            elements.sliderPage.addEventListener('input', (e) => {
+                let p = parseInt(e.target.value);
+                goToPage(p, false);
+            });
+
+            // Zooming Controls
+            elements.btnZoomIn.addEventListener('click', () => setZoom(state.zoomScale + 0.15));
+            elements.btnZoomOut.addEventListener('click', () => setZoom(state.zoomScale - 0.15));
+
+            // Fullscreen toggle
+            elements.btnFullscreen.addEventListener('click', toggleFullscreen);
+
+            // Sidebar toggle
+            elements.btnToggleSidebar.addEventListener('click', () => {
+                elements.sidebarThumbnails.classList.toggle('-translate-x-full');
+            });
+            elements.btnCloseSidebar.addEventListener('click', () => {
+                elements.sidebarThumbnails.classList.add('-translate-x-full');
+            });
+
+            // Themes Popover
+            elements.btnThemeMenu.addEventListener('click', (e) => {
+                e.stopPropagation();
+                elements.popoverAdjustments.classList.add('hidden');
+                elements.popoverThemes.classList.toggle('hidden');
+            });
+
+            document.querySelectorAll('.theme-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    setTheme(btn.getAttribute('data-theme'));
+                    elements.popoverThemes.classList.add('hidden');
+                });
+            });
+
+            // Adjustments Popover
+            elements.btnAdjustMenu.addEventListener('click', (e) => {
+                e.stopPropagation();
+                elements.popoverThemes.classList.add('hidden');
+                elements.popoverAdjustments.classList.toggle('hidden');
+            });
+
+            // Reading History Modal
+            elements.btnLibrary.addEventListener('click', () => {
+                renderLibrary();
+                elements.modalLibrary.classList.remove('hidden');
+            });
+            elements.btnCloseLibrary.addEventListener('click', () => elements.modalLibrary.classList.add('hidden'));
+            elements.modalLibrary.addEventListener('click', (e) => {
+                if (e.target === elements.modalLibrary) elements.modalLibrary.classList.add('hidden');
+            });
+
+            // Shortcuts Modal
+            elements.btnShortcuts.addEventListener('click', () => elements.modalShortcuts.classList.remove('hidden'));
+            elements.btnCloseShortcuts.addEventListener('click', () => elements.modalShortcuts.classList.add('hidden'));
+            elements.modalShortcuts.addEventListener('click', (e) => {
+                if (e.target === elements.modalShortcuts) elements.modalShortcuts.classList.add('hidden');
+            });
+
+            // Sliders Events
+            elements.sliderBrightness.addEventListener('input', (e) => {
+                state.brightness = e.target.value;
+                elements.valBrightness.innerText = `${state.brightness}%`;
+                applyEyeAdjustments();
+            });
+
+            elements.sliderContrast.addEventListener('input', (e) => {
+                state.contrast = e.target.value;
+                elements.valContrast.innerText = `${state.contrast}%`;
+                applyEyeAdjustments();
+            });
+
+            elements.sliderWarmth.addEventListener('input', (e) => {
+                state.warmth = e.target.value;
+                elements.valWarmth.innerText = `${state.warmth}%`;
+                applyEyeAdjustments();
+            });
+
+            elements.btnResetAdjustments.addEventListener('click', () => {
+                state.brightness = 100;
+                state.contrast = 100;
+                state.warmth = 0;
+                elements.sliderBrightness.value = 100;
+                elements.sliderContrast.value = 100;
+                elements.sliderWarmth.value = 0;
+                elements.valBrightness.innerText = '100%';
+                elements.valContrast.innerText = '100%';
+                elements.valWarmth.innerText = '0%';
+                applyEyeAdjustments();
+            });
+
+            // Hide popovers when clicking outside
+            document.addEventListener('click', (e) => {
+                if (!elements.popoverThemes.contains(e.target) && e.target !== elements.btnThemeMenu) {
+                    elements.popoverThemes.classList.add('hidden');
+                }
+                if (!elements.popoverAdjustments.contains(e.target) && e.target !== elements.btnAdjustMenu) {
+                    elements.popoverAdjustments.classList.add('hidden');
+                }
+            });
+
+            // Keyboard Shortcuts Handling
+            document.addEventListener('keydown', (e) => {
+                if (e.target.tagName === 'INPUT') return;
+
+                if (e.key === 'ArrowRight' || e.key === ' ') {
+                    e.preventDefault();
+                    nextPage();
+                } else if (e.key === 'ArrowLeft') {
+                    e.preventDefault();
+                    prevPage();
+                } else if (e.key === 'f' || e.key === 'F') {
+                    e.preventDefault();
+                    toggleFullscreen();
+                } else if (e.key === 'Escape') {
+                    elements.modalShortcuts.classList.add('hidden');
+                    elements.modalLibrary.classList.add('hidden');
+                    elements.popoverThemes.classList.add('hidden');
+                    elements.popoverAdjustments.classList.add('hidden');
+                    elements.sidebarThumbnails.classList.add('-translate-x-full');
+                } else if (e.key === '+' || e.key === '=') {
+                    setZoom(state.zoomScale + 0.15);
+                } else if (e.key === '-') {
+                    setZoom(state.zoomScale - 0.15);
+                }
+            });
+
+            // Window resize handler
+            window.addEventListener('resize', debounce(() => {
+                if (state.pdfDoc) {
+                    resizeBookContainer();
+                    renderSpread(state.currentPage);
+                }
+            }, 200));
+        }
+
+        function handleFileSelect(e) {
+            const file = e.target.files[0];
+            if (file && file.type === 'application/pdf') {
+                loadPDFFile(file);
+            }
+        }
+
+        async function loadPDFFile(file, bookId) {
+            showLoading('Đang đọc file PDF...');
+            state.renderedPagesCache.clear();
+            elements.modalLibrary.classList.add('hidden');
+
+            try {
+                bookId = bookId || `${file.name}|${file.size}|${file.lastModified}`;
+                const savedBook = await historyGet('books', bookId).catch(() => null);
+                const arrayBuffer = await file.arrayBuffer();
+                const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+                state.pdfDoc = await loadingTask.promise;
+                state.totalPages = state.pdfDoc.numPages;
+
+                // Update UI Header & Footer info
+                elements.bookTitle.innerText = file.name.replace('.pdf', '');
+                elements.bookInfo.innerText = `Tổng cộng ${state.totalPages} trang`;
+                elements.totalPages.innerText = state.totalPages;
+                elements.footerPageTotal.innerText = state.totalPages;
+                elements.sliderPage.max = state.totalPages;
+
+                // Calculate Aspect Ratio from Page 1
+                const firstPage = await state.pdfDoc.getPage(1);
+                const viewport = firstPage.getViewport({ scale: 1.0 });
+                state.pageAspectRatio = viewport.height / viewport.width;
+
+                // Prepare Workspace
+                elements.emptyState.classList.add('hidden');
+                elements.bookWrapper.classList.remove('hidden');
+                elements.navBtnPrev.classList.remove('hidden');
+                elements.navBtnNext.classList.remove('hidden');
+
+                // Render Sidebar Thumbnails
+                generateThumbnails();
+
+                // Resume from saved page (or start at page 1)
+                const startPage = savedBook ? Math.min(savedBook.lastPage || 1, state.totalPages) : 1;
+                state.currentBookId = null; // don't save progress until the record exists
+                state.currentPage = 1;
+                resizeBookContainer();
+                await renderSpread(startPage);
+
+                // Save book to reading history
+                const record = {
+                    id: bookId,
+                    name: file.name.replace(/\.pdf$/i, ''),
+                    size: file.size,
+                    totalPages: state.totalPages,
+                    lastPage: state.currentPage,
+                    lastOpened: Date.now(),
+                    cover: savedBook && savedBook.cover ? savedBook.cover : await renderCoverDataURL()
+                };
+                try {
+                    if (!savedBook) await historyPut('files', { id: bookId, blob: file, lastModified: file.lastModified });
+                    await historyPut('books', record);
+                    state.currentBookId = bookId;
+                    renderLibrary();
+                } catch (dbErr) {
+                    console.warn('Không thể lưu lịch sử đọc: ', dbErr);
+                }
+
+            } catch (err) {
+                console.error('Lỗi khi tải PDF: ', err);
+                alert('Không thể đọc file PDF này. File có thể bị lỗi hoặc bảo mật.');
+            } finally {
+                hideLoading();
+            }
+        }
+
+        function resizeBookContainer() {
+            if (!state.pdfDoc) return;
+
+            const workspace = document.getElementById('reader-workspace');
+            const availableWidth = workspace.clientWidth - 40; // padding
+            const availableHeight = workspace.clientHeight - 40;
+
+            // Dual page spread aspect ratio (Width = 2 * PageWidth)
+            const spreadWidthToHeightRatio = 2 / state.pageAspectRatio;
+
+            let calcWidth = availableWidth;
+            let calcHeight = calcWidth / spreadWidthToHeightRatio;
+
+            if (calcHeight > availableHeight) {
+                calcHeight = availableHeight;
+                calcWidth = calcHeight * spreadWidthToHeightRatio;
+            }
+
+            // Apply Zoom scale
+            calcWidth *= state.zoomScale;
+            calcHeight *= state.zoomScale;
+
+            const singlePageWidth = calcWidth / 2;
+
+            elements.bookContainer.style.width = `${calcWidth}px`;
+            elements.bookContainer.style.height = `${calcHeight}px`;
+
+            elements.leftPageContainer.style.width = `${singlePageWidth}px`;
+            elements.leftPageContainer.style.height = `${calcHeight}px`;
+
+            elements.rightPageContainer.style.width = `${singlePageWidth}px`;
+            elements.rightPageContainer.style.height = `${calcHeight}px`;
+
+            elements.flipSheet.style.width = `${singlePageWidth}px`;
+            elements.flipSheet.style.height = `${calcHeight}px`;
+        }
+
+        async function renderSpread(pageNumber) {
+            if (!state.pdfDoc) return;
+
+            // Adjust to always start on odd page for left/right spread logic
+            const leftNum = pageNumber % 2 === 0 ? pageNumber - 1 : pageNumber;
+            const rightNum = leftNum + 1;
+
+            state.currentPage = leftNum;
+            updateNavigationUI();
+
+            // Render both pages together so they appear in the same frame
+            await Promise.all([
+                drawPage(leftNum, elements.canvasLeft),
+                drawPage(rightNum, elements.canvasRight)
+            ]);
+
+            // Show corner hints where appropriate
+            elements.hintLeft.classList.toggle('hidden', leftNum <= 1);
+            elements.hintRight.classList.toggle('hidden', rightNum >= state.totalPages);
+
+            // Pre-render neighbouring pages so the next flip starts instantly
+            [leftNum + 2, leftNum + 3, leftNum - 1, leftNum - 2].forEach(n => {
+                if (n >= 1 && n <= state.totalPages) getPageImage(n).catch(() => {});
+            });
+        }
+
+        // Copies a cached page render onto a visible canvas (blank page if out of range)
+        async function drawPage(pageNum, canvas) {
+            if (pageNum < 1 || pageNum > state.totalPages) {
+                clearCanvas(canvas);
+                return;
+            }
+            const img = await getPageImage(pageNum);
+            canvas.width = img.width;
+            canvas.height = img.height;
+            canvas.getContext('2d').drawImage(img, 0, 0);
+        }
+
+        // Renders a page offscreen at the current page size; results are cached per size
+        function getPageImage(pageNum) {
+            const width = elements.leftPageContainer.clientWidth;
+            const height = elements.leftPageContainer.clientHeight;
+            const key = `${pageNum}@${width}x${height}`;
+            const cache = state.renderedPagesCache;
+
+            if (cache.has(key)) {
+                const cached = cache.get(key);
+                cache.delete(key); // refresh LRU order
+                cache.set(key, cached);
+                return cached;
+            }
+
+            const canvas = document.createElement('canvas');
+            const promise = renderPageToCanvas(pageNum, canvas, width, height).then(() => canvas);
+            promise.catch(() => cache.delete(key));
+            cache.set(key, promise);
+
+            while (cache.size > 16) {
+                cache.delete(cache.keys().next().value);
+            }
+            return promise;
+        }
+
+        async function renderPageToCanvas(pageNum, canvas, containerWidth, containerHeight) {
+            const page = await state.pdfDoc.getPage(pageNum);
+
+            // Render at high devicePixelRatio for crisp text scaling
+            const dpr = window.devicePixelRatio || 1.5;
+            const viewport = page.getViewport({ scale: 1.0 });
+            
+            const scaleX = containerWidth / viewport.width;
+            const scaleY = containerHeight / viewport.height;
+            const scale = Math.min(scaleX, scaleY) * dpr;
+
+            const scaledViewport = page.getViewport({ scale: scale });
+
+            canvas.width = scaledViewport.width;
+            canvas.height = scaledViewport.height;
+
+            const ctx = canvas.getContext('2d');
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+
+            const renderContext = {
+                canvasContext: ctx,
+                viewport: scaledViewport
+            };
+
+            await page.render(renderContext).promise;
+        }
+
+        function clearCanvas(canvas) {
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+
+        // Plays the 3D page turn. 'next' turns the right page over to the left, 'prev' the reverse.
+        async function playFlip(direction) {
+            const isNext = direction === 'next';
+            const sheet = elements.flipSheet;
+            const pageWidth = elements.leftPageContainer.offsetWidth;
+            const angle = isNext ? -180 : 180;
+            const revealedShadow = isNext ? elements.castShadowRight : elements.castShadowLeft;
+            const landingShadow = isNext ? elements.castShadowLeft : elements.castShadowRight;
+            const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+            const opts = {
+                duration: reduceMotion ? 150 : (state.queuedFlip ? 420 : 750),
+                easing: 'cubic-bezier(0.42, 0.0, 0.2, 1)',
+                fill: 'forwards'
+            };
+
+            const animations = [
+                sheet.animate([
+                    { transform: 'perspective(2400px) rotateY(0deg)', boxShadow: '0 0 0 rgba(0,0,0,0)' },
+                    { transform: `perspective(2400px) rotateY(${angle / 2}deg) translateZ(30px)`, boxShadow: '0 10px 40px rgba(0,0,0,0.3)', offset: 0.5 },
+                    { transform: `perspective(2400px) rotateY(${angle}deg)`, boxShadow: '0 0 0 rgba(0,0,0,0)' }
+                ], opts),
+                elements.flipShadeFront.animate([
+                    { opacity: 0 },
+                    { opacity: 0.6, offset: 0.5 },
+                    { opacity: 0.6 }
+                ], opts),
+                elements.flipShadeBack.animate([
+                    { opacity: 0.6 },
+                    { opacity: 0.6, offset: 0.5 },
+                    { opacity: 0 }
+                ], opts),
+                revealedShadow.animate([
+                    { opacity: 0 },
+                    { opacity: 1, offset: 0.25 },
+                    { opacity: 0.4, offset: 0.55 },
+                    { opacity: 0 }
+                ], opts),
+                landingShadow.animate([
+                    { opacity: 0 },
+                    { opacity: 0, offset: 0.5 },
+                    { opacity: 0.9, offset: 0.85 },
+                    { opacity: 0 }
+                ], opts)
+            ];
+
+            await Promise.all(animations.map(a => a.finished));
+            return animations;
+        }
+
+        function showFlipSheet(direction) {
+            const isNext = direction === 'next';
+            const sheet = elements.flipSheet;
+            sheet.className = `page-sheet ${isNext ? 'page-right' : 'page-left'}`;
+            sheet.style.left = isNext ? `${elements.leftPageContainer.offsetWidth}px` : '0px';
+        }
+
+        function hideFlipSheet(animations) {
+            elements.flipSheet.className = 'page-sheet hidden';
+            animations.forEach(a => a.cancel());
+        }
+
+        async function flipPage(direction) {
+            if (!state.pdfDoc) return;
+            if (state.isFlipping) {
+                state.queuedFlip = direction;
+                return;
+            }
+
+            const isNext = direction === 'next';
+            const current = state.currentPage;
+            const target = isNext ? current + 2 : current - 2;
+            if (target < 1 || target > state.totalPages) return;
+
+            state.isFlipping = true;
+            let animations = [];
+            try {
+                if (isNext) {
+                    // Front: current right page, back: new left page
+                    await Promise.all([
+                        drawPage(current + 1, elements.canvasFlip),
+                        drawPage(target, elements.canvasFlipBack),
+                        getPageImage(target + 1).catch(() => {})
+                    ]);
+                    showFlipSheet('next');
+                    // Sheet now covers the right page; reveal the next right page underneath
+                    await drawPage(target + 1, elements.canvasRight);
+                    elements.hintRight.classList.add('hidden');
+                } else {
+                    // Front: current left page, back: new right page
+                    await Promise.all([
+                        drawPage(current, elements.canvasFlip),
+                        drawPage(target + 1, elements.canvasFlipBack),
+                        getPageImage(target).catch(() => {})
+                    ]);
+                    showFlipSheet('prev');
+                    await drawPage(target, elements.canvasLeft);
+                    elements.hintLeft.classList.add('hidden');
+                }
+
+                animations = await playFlip(direction);
+                // Draw the final spread while the sheet still covers it, then remove the sheet
+                await renderSpread(target);
+            } catch (err) {
+                console.error('Lỗi khi lật trang: ', err);
+                await renderSpread(target);
+            } finally {
+                hideFlipSheet(animations);
+                state.isFlipping = false;
+            }
+
+            if (state.queuedFlip) {
+                const queued = state.queuedFlip;
+                state.queuedFlip = null;
+                flipPage(queued);
+            }
+        }
+
+        function nextPage() {
+            return flipPage('next');
+        }
+
+        function prevPage() {
+            return flipPage('prev');
+        }
+
+        function goToPage(pageNumber, triggerAnimation = true) {
+            if (!state.pdfDoc) return;
+            let target = Math.max(1, Math.min(pageNumber, state.totalPages));
+            if (target % 2 === 0) target -= 1; // Align to left page
+
+            if (target !== state.currentPage) {
+                renderSpread(target);
+            }
+        }
+
+        function updateNavigationUI() {
+            const currentDisplay = `${state.currentPage}-${Math.min(state.currentPage + 1, state.totalPages)}`;
+            elements.inputPage.value = state.currentPage;
+            elements.footerPageCurr.innerText = currentDisplay;
+            elements.sliderPage.value = state.currentPage;
+            saveReadingProgress();
+
+            // Highlight thumbnail item
+            document.querySelectorAll('.thumbnail-card').forEach(card => {
+                const p = parseInt(card.getAttribute('data-page'));
+                if (p === state.currentPage || p === state.currentPage + 1) {
+                    card.classList.add('border-taupe', 'ring-2', 'ring-taupe/30');
+                } else {
+                    card.classList.remove('border-taupe', 'ring-2', 'ring-taupe/30');
+                }
+            });
+        }
+
+        async function generateThumbnails() {
+            elements.thumbnailsContainer.innerHTML = '';
+            
+            for (let i = 1; i <= state.totalPages; i++) {
+                const card = document.createElement('div');
+                card.className = 'thumbnail-card cursor-pointer border rounded-lg p-1 bg-white/50 dark:bg-black/20 hover:border-taupe transition text-center';
+                card.setAttribute('data-page', i);
+
+                const canvas = document.createElement('canvas');
+                canvas.className = 'w-full h-auto rounded shadow-sm block mb-1';
+
+                const label = document.createElement('span');
+                label.className = 'text-[10px] font-medium opacity-70';
+                label.innerText = `Trang ${i}`;
+
+                card.appendChild(canvas);
+                card.appendChild(label);
+
+                card.addEventListener('click', () => {
+                    goToPage(i);
+                    elements.sidebarThumbnails.classList.add('-translate-x-full');
+                });
+
+                elements.thumbnailsContainer.appendChild(card);
+
+                // Render low-res thumbnail asynchronously
+                renderThumbnail(i, canvas);
+            }
+        }
+
+        async function renderThumbnail(pageNum, canvas) {
+            try {
+                const page = await state.pdfDoc.getPage(pageNum);
+                const viewport = page.getViewport({ scale: 0.2 });
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+                const ctx = canvas.getContext('2d');
+                await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+            } catch (e) {
+                console.error('Lỗi render thumbnail trang', pageNum, e);
+            }
+        }
+
+        function setTheme(themeName) {
+            state.currentTheme = themeName;
+            document.body.className = `theme-${themeName} h-full transition-colors duration-300`;
+            document.querySelectorAll('.theme-btn').forEach(btn => {
+                const active = btn.getAttribute('data-theme') === themeName;
+                btn.classList.toggle('ring-2', active);
+                btn.classList.toggle('ring-taupe', active);
+            });
+        }
+
+        function applyEyeAdjustments() {
+            const brightnessVal = state.brightness / 100;
+            const contrastVal = state.contrast / 100;
+            const warmthVal = state.warmth / 100;
+
+            document.documentElement.style.setProperty('--brightness', brightnessVal);
+            document.documentElement.style.setProperty('--contrast', contrastVal);
+            document.documentElement.style.setProperty('--warmth', warmthVal);
+        }
+
+        function setZoom(scale) {
+            state.zoomScale = Math.max(0.6, Math.min(1.8, scale));
+            elements.zoomValue.innerText = `${Math.round(state.zoomScale * 100)}%`;
+            if (state.pdfDoc) {
+                resizeBookContainer();
+                renderSpread(state.currentPage);
+            }
+        }
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch(err => {
+                    console.error('Không thể mở toàn màn hình:', err);
+                });
+            } else {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                }
+            }
+        }
+
+        // ===== Reading History (IndexedDB) =====
+        // 'books' holds metadata + progress, 'files' holds the PDF blob so progress updates stay cheap
+        let historyDBPromise = null;
+        function openHistoryDB() {
+            if (!historyDBPromise) {
+                historyDBPromise = new Promise((resolve, reject) => {
+                    const req = indexedDB.open('ebook-reader-history', 1);
+                    req.onupgradeneeded = () => {
+                        const db = req.result;
+                        if (!db.objectStoreNames.contains('books')) db.createObjectStore('books', { keyPath: 'id' });
+                        if (!db.objectStoreNames.contains('files')) db.createObjectStore('files', { keyPath: 'id' });
+                    };
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => reject(req.error);
+                });
+            }
+            return historyDBPromise;
+        }
+
+        async function historyRequest(storeName, mode, action) {
+            const db = await openHistoryDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction(storeName, mode);
+                const req = action(tx.objectStore(storeName));
+                tx.oncomplete = () => resolve(req.result);
+                tx.onerror = () => reject(tx.error);
+                tx.onabort = () => reject(tx.error);
+            });
+        }
+
+        const historyGet = (store, id) => historyRequest(store, 'readonly', s => s.get(id));
+        const historyGetAll = (store) => historyRequest(store, 'readonly', s => s.getAll());
+        const historyPut = (store, value) => historyRequest(store, 'readwrite', s => s.put(value));
+        const historyDelete = (store, id) => historyRequest(store, 'readwrite', s => s.delete(id));
+
+        const saveReadingProgress = debounce(async () => {
+            if (!state.currentBookId) return;
+            try {
+                const book = await historyGet('books', state.currentBookId);
+                if (!book) return;
+                book.lastPage = state.currentPage;
+                book.lastOpened = Date.now();
+                await historyPut('books', book);
+            } catch (err) {
+                console.warn('Không thể lưu tiến độ đọc: ', err);
+            }
+        }, 400);
+
+        async function renderCoverDataURL() {
+            try {
+                const page = await state.pdfDoc.getPage(1);
+                const base = page.getViewport({ scale: 1 });
+                const viewport = page.getViewport({ scale: 120 / base.width });
+                const canvas = document.createElement('canvas');
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+                await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+                return canvas.toDataURL('image/jpeg', 0.7);
+            } catch (err) {
+                return null;
+            }
+        }
+
+        async function openBookFromHistory(bookId) {
+            try {
+                const [book, fileRec] = await Promise.all([historyGet('books', bookId), historyGet('files', bookId)]);
+                if (!book || !fileRec) {
+                    alert('Không tìm thấy dữ liệu sách này, vui lòng mở lại file PDF.');
+                    await deleteBookFromHistory(bookId);
+                    return;
+                }
+                const file = new File([fileRec.blob], `${book.name}.pdf`, { type: 'application/pdf', lastModified: fileRec.lastModified });
+                await loadPDFFile(file, bookId);
+            } catch (err) {
+                console.error('Lỗi khi mở sách từ lịch sử: ', err);
+                alert('Không thể mở sách từ lịch sử.');
+            }
+        }
+
+        async function deleteBookFromHistory(bookId) {
+            try {
+                await historyDelete('books', bookId);
+                await historyDelete('files', bookId);
+            } catch (err) {
+                console.warn('Không thể xóa sách khỏi lịch sử: ', err);
+            }
+            if (state.currentBookId === bookId) state.currentBookId = null;
+            renderLibrary();
+        }
+
+        function escapeHTML(str) {
+            return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        function formatTimeAgo(ts) {
+            const diff = Math.floor((Date.now() - ts) / 1000);
+            if (diff < 60) return 'Vừa xong';
+            if (diff < 3600) return `${Math.floor(diff / 60)} phút trước`;
+            if (diff < 86400) return `${Math.floor(diff / 3600)} giờ trước`;
+            if (diff < 86400 * 30) return `${Math.floor(diff / 86400)} ngày trước`;
+            return new Date(ts).toLocaleDateString('vi-VN');
+        }
+
+        async function renderLibrary() {
+            let books = [];
+            try {
+                books = await historyGetAll('books');
+            } catch (err) {
+                console.warn('Không thể đọc lịch sử: ', err);
+            }
+            books.sort((a, b) => b.lastOpened - a.lastOpened);
+
+            const html = books.map(book => {
+                const readUpTo = Math.min(book.lastPage + 1, book.totalPages);
+                const percent = book.totalPages ? Math.round(readUpTo / book.totalPages * 100) : 0;
+                const isCurrent = book.id === state.currentBookId;
+                return `
+                    <div class="history-item flex items-center gap-3 p-2 rounded-xl border hover:border-taupe hover:bg-taupe/5 cursor-pointer transition ${isCurrent ? 'border-taupe bg-taupe/10' : 'border-black/10 dark:border-white/10'}" data-id="${escapeHTML(book.id)}">
+                        <div class="w-10 h-14 shrink-0 rounded bg-black/10 dark:bg-white/10 overflow-hidden flex items-center justify-center shadow-sm">
+                            ${book.cover ? `<img src="${book.cover}" class="w-full h-full object-cover" alt="">` : '<i class="fa-solid fa-file-pdf text-taupe"></i>'}
+                        </div>
+                        <div class="flex-1 min-w-0">
+                            <p class="font-semibold text-sm truncate" title="${escapeHTML(book.name)}">${escapeHTML(book.name)}</p>
+                            <p class="text-xs opacity-70">Trang ${readUpTo}/${book.totalPages} · ${formatTimeAgo(book.lastOpened)}</p>
+                            <div class="mt-1 h-1 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
+                                <div class="h-full bg-taupe" style="width:${percent}%"></div>
+                            </div>
+                        </div>
+                        <button class="history-delete p-2 rounded-lg opacity-50 hover:opacity-100 hover:text-red-600 transition" title="Xóa khỏi lịch sử">
+                            <i class="fa-solid fa-trash-can text-sm"></i>
+                        </button>
+                    </div>`;
+            }).join('');
+
+            elements.libraryList.innerHTML = html || '<p class="text-sm opacity-60 text-center py-6">Chưa có sách nào trong lịch sử đọc.</p>';
+            elements.emptyRecentList.innerHTML = html;
+            elements.emptyRecent.classList.toggle('hidden', books.length === 0);
+
+            [elements.libraryList, elements.emptyRecentList].forEach(list => {
+                list.querySelectorAll('.history-item').forEach(item => {
+                    const id = item.getAttribute('data-id');
+                    item.addEventListener('click', () => openBookFromHistory(id));
+                    item.querySelector('.history-delete').addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        if (confirm('Xóa sách này khỏi lịch sử đọc?')) deleteBookFromHistory(id);
+                    });
+                });
+            });
+        }
+
+        // Helper Utility Functions
+        function showLoading(msg) {
+            elements.loadingText.innerText = msg || 'Đang xử lý...';
+            elements.loadingOverlay.classList.remove('hidden');
+        }
+
+        function hideLoading() {
+            elements.loadingOverlay.classList.add('hidden');
+        }
+
+        function debounce(func, wait) {
+            let timeout;
+            return function executedFunction(...args) {
+                const later = () => {
+                    clearTimeout(timeout);
+                    func(...args);
+                };
+                clearTimeout(timeout);
+                timeout = setTimeout(later, wait);
+            };
+        }
+    </script>
+</body>
+</html>
